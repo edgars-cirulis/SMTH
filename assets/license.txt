@@ -1,0 +1,8 @@
+Model Information:
+* title:	Gothic Window
+* source:	https://sketchfab.com/3d-models/gothic-window-a6b46a943c5842ddbb8aa5058b0cdee0
+* author:	abhayexe (https://sketchfab.com/abhayexe)
+
+Model License:
+* license type:	SKETCHFAB Standard (https://sketchfab.com/licenses)
+* requirements:	Under basic restrictions, use worldwide, on all types of media, commercially or not, and in all types of derivative works
