@@ -4,6 +4,7 @@
 #include "VulkanContext.hpp"
 #include "VulkanHelpers.hpp"
 #include "engine/core/Log.hpp"
+#include "engine/platform/WindowUserData.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -19,11 +20,15 @@ void VulkanContext::initWindow(int w, int h, const char* title)
     if (!win)
         throw std::runtime_error("glfwCreateWindow failed");
 
-    glfwSetWindowUserPointer(win, this);
+    if (!windowUserData)
+        windowUserData = new WindowUserData{};
+    windowUserData->vk = this;
+    glfwSetWindowUserPointer(win, windowUserData);
+
     glfwSetFramebufferSizeCallback(win, [](GLFWwindow* w, int, int) {
-        auto* self = reinterpret_cast<VulkanContext*>(glfwGetWindowUserPointer(w));
-        if (self)
-            self->requestSwapchainRebuild();
+        auto* ud = reinterpret_cast<WindowUserData*>(glfwGetWindowUserPointer(w));
+        if (ud && ud->vk)
+            ud->vk->requestSwapchainRebuild();
     });
 }
 
@@ -73,8 +78,19 @@ void VulkanContext::recreateSwapchain()
     }
 
     vkDeviceWaitIdle(dev);
-    cleanupSwapchain();
-    createOrResizeSwapchain();
+
+    VkSwapchainKHR oldSwap = swap;
+    cleanupSwapchain(false);
+
+    createSwapchain(oldSwap);
+    createDepthResources();
+    if (!useDynamicRendering) {
+        createRenderPass();
+        createFramebuffers();
+    }
+
+    if (oldSwap)
+        vkDestroySwapchainKHR(dev, oldSwap, nullptr);
     swapchainGen++;
 }
 
@@ -167,9 +183,12 @@ void VulkanContext::shutdown()
         win = nullptr;
         glfwTerminate();
     }
+
+    delete windowUserData;
+    windowUserData = nullptr;
 }
 
-void VulkanContext::cleanupSwapchain()
+void VulkanContext::cleanupSwapchain(bool destroySwapchain)
 {
     for (auto fb : framebuffers)
         vkDestroyFramebuffer(dev, fb, nullptr);
@@ -198,9 +217,10 @@ void VulkanContext::cleanupSwapchain()
     swapImages.clear();
     swapImageLayouts.clear();
 
-    if (swap)
+    if (destroySwapchain && swap)
         vkDestroySwapchainKHR(dev, swap, nullptr);
-    swap = {};
+    if (destroySwapchain)
+        swap = {};
 }
 
 void VulkanContext::createInstance()
@@ -474,7 +494,7 @@ void VulkanContext::loadDeviceFunctionPointers()
     }
 }
 
-void VulkanContext::createSwapchain()
+void VulkanContext::createSwapchain(VkSwapchainKHR oldSwapchain)
 {
     VkSurfaceCapabilitiesKHR caps{};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys, surf, &caps);
@@ -530,6 +550,7 @@ void VulkanContext::createSwapchain()
     sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     sci.presentMode = pm;
     sci.clipped = VK_TRUE;
+    sci.oldSwapchain = oldSwapchain;
 
     vkCheck(vkCreateSwapchainKHR(dev, &sci, nullptr, &swap), "vkCreateSwapchainKHR");
     swapFormat = chosen.format;
@@ -767,71 +788,6 @@ VkCommandBuffer VulkanContext::beginFrame()
 
 void VulkanContext::beginMainPass(VkCommandBuffer cmd)
 {
-    if (useDynamicRendering) {
-        VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-        barrier.oldLayout = swapImageLayouts.empty() ? VK_IMAGE_LAYOUT_UNDEFINED : swapImageLayouts[acquiredImage];
-        barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = swapImages[acquiredImage];
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.levelCount = 1;
-        barrier.subresourceRange.layerCount = 1;
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
-                             nullptr, 1, &barrier);
-
-        if (!swapImageLayouts.empty())
-            swapImageLayouts[acquiredImage] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkImageMemoryBarrier dbar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-        dbar.oldLayout = depthLayout;
-        dbar.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        dbar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        dbar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        dbar.image = depthImg;
-        dbar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        dbar.subresourceRange.levelCount = 1;
-        dbar.subresourceRange.layerCount = 1;
-        dbar.srcAccessMask = 0;
-        dbar.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, nullptr, 0, nullptr,
-                             1, &dbar);
-
-        depthLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkClearValue cclear{};
-        cclear.color = { { 0.05f, 0.06f, 0.08f, 1.0f } };
-
-        VkClearValue dclear{};
-        dclear.depthStencil = { 1.0f, 0 };
-
-        VkRenderingAttachmentInfoKHR colorAtt{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
-        colorAtt.imageView = swapViews[acquiredImage];
-        colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAtt.clearValue = cclear;
-
-        VkRenderingAttachmentInfoKHR depthAtt{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
-        depthAtt.imageView = depthIv;
-        depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAtt.clearValue = dclear;
-
-        VkRenderingInfoKHR ri{ VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
-        ri.renderArea = VkRect2D{ { 0, 0 }, swapExtent };
-        ri.layerCount = 1;
-        ri.colorAttachmentCount = 1;
-        ri.pColorAttachments = &colorAtt;
-        ri.pDepthAttachment = &depthAtt;
-
-        pfnCmdBeginRendering(cmd, &ri);
-        return;
-    }
-
     VkClearValue clears[2]{};
     clears[0].color = { { 0.05f, 0.06f, 0.08f, 1.0f } };
     clears[1].depthStencil = { 1.0f, 0 };
@@ -848,10 +804,6 @@ void VulkanContext::beginMainPass(VkCommandBuffer cmd)
 
 void VulkanContext::endMainPass(VkCommandBuffer cmd)
 {
-    if (useDynamicRendering) {
-        pfnCmdEndRendering(cmd);
-        return;
-    }
     vkCmdEndRenderPass(cmd);
 }
 
@@ -997,6 +949,60 @@ void VulkanContext::cmdPipelineBarrier2(VkCommandBuffer cmd, const VkDependencyI
 
     vkCmdPipelineBarrier(cmd, srcStages, dstStages, 0, (uint32_t)mem.size(), mem.data(), (uint32_t)buf.size(), buf.data(),
                          (uint32_t)img.size(), img.data());
+}
+
+void VulkanContext::transitionImage(VkCommandBuffer cmd,
+                                    VkImage image,
+                                    VkImageAspectFlags aspect,
+                                    VkImageLayout oldLayout,
+                                    VkImageLayout newLayout,
+                                    VkPipelineStageFlags2 srcStage,
+                                    VkAccessFlags2 srcAccess,
+                                    VkPipelineStageFlags2 dstStage,
+                                    VkAccessFlags2 dstAccess) const
+{
+    VkImageMemoryBarrier2 b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
+    b.srcStageMask = srcStage;
+    b.srcAccessMask = srcAccess;
+    b.dstStageMask = dstStage;
+    b.dstAccessMask = dstAccess;
+    b.oldLayout = oldLayout;
+    b.newLayout = newLayout;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.subresourceRange.aspectMask = aspect;
+    b.subresourceRange.baseMipLevel = 0;
+    b.subresourceRange.levelCount = 1;
+    b.subresourceRange.baseArrayLayer = 0;
+    b.subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &b;
+    cmdPipelineBarrier2(cmd, dep);
+}
+
+void VulkanContext::transitionImageAuto(VkCommandBuffer cmd,
+                                        VkImage image,
+                                        VkImageAspectFlags aspect,
+                                        VkImageLayout oldLayout,
+                                        VkImageLayout newLayout) const
+{
+    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        transitionImage(cmd, image, aspect, oldLayout, newLayout, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        return;
+    }
+
+    if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        transitionImage(cmd, image, aspect, oldLayout, newLayout, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        return;
+    }
+
+    transitionImage(cmd, image, aspect, oldLayout, newLayout, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                    0);
 }
 
 static bool transientImageKeyMatch(const VulkanContext::TransientImage2D& a,

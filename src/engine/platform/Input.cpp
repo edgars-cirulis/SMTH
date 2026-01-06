@@ -1,11 +1,20 @@
 #include "Input.hpp"
 #include <GLFW/glfw3.h>
 
+#include "WindowUserData.hpp"
+
 void Input::attach(GLFWwindow* win)
 {
     window = win;
-    glfwSetWindowUserPointer(window, this);
+    auto* ud = static_cast<WindowUserData*>(glfwGetWindowUserPointer(window));
+    if (!ud) {
+        ud = new WindowUserData{};
+        glfwSetWindowUserPointer(window, ud);
+    }
+    ud->input = this;
+
     glfwSetScrollCallback(window, &Input::onScroll);
+    glfwSetWindowFocusCallback(window, &Input::onFocus);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     if (glfwRawMouseMotionSupported()) {
@@ -50,9 +59,20 @@ void Input::endFrame() noexcept
 
 void Input::onScroll(GLFWwindow* win, double, double yoff)
 {
-    auto* self = static_cast<Input*>(glfwGetWindowUserPointer(win));
-    if (!self)
+    auto* ud = static_cast<WindowUserData*>(glfwGetWindowUserPointer(win));
+    if (!ud || !ud->input)
         return;
 
-    self->sdy += yoff;
+    ud->input->sdy += yoff;
+}
+
+void Input::onFocus(GLFWwindow* win, int /*focused*/)
+{
+    auto* ud = static_cast<WindowUserData*>(glfwGetWindowUserPointer(win));
+    if (!ud || !ud->input)
+        return;
+
+    ud->input->firstMouse = true;
+    ud->input->mdx = 0.0;
+    ud->input->mdy = 0.0;
 }

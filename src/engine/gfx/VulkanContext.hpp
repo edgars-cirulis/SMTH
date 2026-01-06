@@ -7,6 +7,8 @@
 
 #include "engine/core/DeletionQueue.hpp"
 
+struct WindowUserData;
+
 class VulkanContext {
    public:
     void initWindow(int w, int h, const char* title);
@@ -64,6 +66,22 @@ class VulkanContext {
     void setObjectName(VkObjectType type, uint64_t handle, const char* name) const;
 
     void cmdPipelineBarrier2(VkCommandBuffer cmd, const VkDependencyInfo& dep) const;
+
+    void transitionImage(VkCommandBuffer cmd,
+                         VkImage image,
+                         VkImageAspectFlags aspect,
+                         VkImageLayout oldLayout,
+                         VkImageLayout newLayout,
+                         VkPipelineStageFlags2 srcStage,
+                         VkAccessFlags2 srcAccess,
+                         VkPipelineStageFlags2 dstStage,
+                         VkAccessFlags2 dstAccess) const;
+
+    void transitionImageAuto(VkCommandBuffer cmd,
+                             VkImage image,
+                             VkImageAspectFlags aspect,
+                             VkImageLayout oldLayout,
+                             VkImageLayout newLayout) const;
 
     struct TransientImage2D {
         VkFormat format = VK_FORMAT_UNDEFINED;
@@ -124,14 +142,14 @@ class VulkanContext {
     void createSurface();
     void pickPhysicalDevice();
     void createDevice();
-    void createSwapchain();
+    void createSwapchain(VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
     void createDepthResources();
     void createRenderPass();
     void createFramebuffers();
     void createCommands();
     void createSync();
 
-    void cleanupSwapchain();
+    void cleanupSwapchain(bool destroySwapchain = true);
 
     void createOrResizeSwapchain();
 
@@ -185,7 +203,7 @@ class VulkanContext {
     VkCommandPool cmdPool{};
     std::vector<VkCommandBuffer> cmdBuffers;
 
-    static constexpr uint32_t MAX_FRAMES = 2;
+    static constexpr uint32_t MAX_FRAMES = 3;
     uint32_t frameIndex = 0;
     uint32_t acquiredImage = 0;
 
@@ -203,6 +221,8 @@ class VulkanContext {
 
     bool framebufferResized = false;
     uint64_t swapchainGen = 0;
+
+    WindowUserData* windowUserData = nullptr;
 
     std::vector<VkImageLayout> swapImageLayouts;
     VkImageLayout depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;

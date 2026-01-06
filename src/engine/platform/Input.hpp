@@ -33,4 +33,5 @@ class Input {
     bool firstMouse = true;
 
     static void onScroll(GLFWwindow* win, double xoff, double yoff);
+    static void onFocus(GLFWwindow* win, int focused);
 };
